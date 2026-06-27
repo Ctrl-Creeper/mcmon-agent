@@ -1,9 +1,13 @@
 package reporter
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,9 +52,10 @@ type Reporter struct {
 	token   string
 	targets []Target
 
-	mu   sync.Mutex
-	conn *websocket.Conn
-	done chan struct{}
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	done       chan struct{}
+	httpClient *http.Client
 }
 
 func New(hostURL, token string, targets []Target) *Reporter {
@@ -59,6 +64,9 @@ func New(hostURL, token string, targets []Target) *Reporter {
 		token:   token,
 		targets: targets,
 		done:    make(chan struct{}),
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 }
 
@@ -98,6 +106,9 @@ func (r *Reporter) SendPingResult(pr PingResult) {
 	r.mu.Unlock()
 
 	if c == nil {
+		if err := r.postRPC("post", "agent.pingResult", pr); err != nil {
+			log.Printf("post pingResult: %v", err)
+		}
 		return
 	}
 
@@ -105,12 +116,17 @@ func (r *Reporter) SendPingResult(pr PingResult) {
 	data, _ := json.Marshal(msg)
 	if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
 		log.Printf("send pingResult: %v", err)
+		if err := r.postRPC("post", "agent.pingResult", pr); err != nil {
+			log.Printf("post pingResult: %v", err)
+		}
 	}
 }
 
 func (r *Reporter) connect() error {
-	url := fmt.Sprintf("%s/api/ws?token=%s", r.hostURL, r.token)
-	ws, _, err := websocket.DefaultDialer.Dial(url, nil)
+	url := strings.TrimSuffix(r.hostURL, "/") + "/api/agents/v2/rpc"
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+r.token)
+	ws, _, err := websocket.DefaultDialer.Dial(url, headers)
 	if err != nil {
 		return err
 	}
@@ -133,6 +149,41 @@ func (r *Reporter) connect() error {
 
 	log.Printf("connected to host, sent hello with %d targets", len(r.targets))
 	return nil
+}
+
+func (r *Reporter) postRPC(id any, method string, params any) error {
+	msg := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	url := strings.TrimSuffix(httpURL(r.hostURL), "/") + "/api/agents/v2/rpc"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("host returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func httpURL(raw string) string {
+	if strings.HasPrefix(raw, "ws://") {
+		return "http://" + strings.TrimPrefix(raw, "ws://")
+	}
+	if strings.HasPrefix(raw, "wss://") {
+		return "https://" + strings.TrimPrefix(raw, "wss://")
+	}
+	return raw
 }
 
 func (r *Reporter) readLoop() {

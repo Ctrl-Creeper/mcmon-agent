@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -198,17 +200,19 @@ type discoverResp struct {
 }
 
 func discover(hostURL, key, name string) (string, error) {
-	url := fmt.Sprintf("%s/api/discover?name=%s", hostURL, name)
-	req, _ := http.NewRequest("POST", url, nil)
+	endpoint := fmt.Sprintf("%s/api/discover?name=%s", strings.TrimSuffix(httpURL(hostURL), "/"), url.QueryEscape(name))
+	req, _ := http.NewRequest("POST", endpoint, nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("discovery returned %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return "", fmt.Errorf("discovery returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 	var dr discoverResp
 	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
@@ -226,4 +230,14 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func httpURL(raw string) string {
+	if strings.HasPrefix(raw, "ws://") {
+		return "http://" + strings.TrimPrefix(raw, "ws://")
+	}
+	if strings.HasPrefix(raw, "wss://") {
+		return "https://" + strings.TrimPrefix(raw, "wss://")
+	}
+	return raw
 }
