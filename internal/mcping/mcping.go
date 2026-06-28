@@ -11,9 +11,38 @@ import (
 )
 
 type Result struct {
-	OK        bool
-	LatencyMs float64
-	Err       error
+	OK            bool
+	LatencyMs     float64
+	PlayersOnline *int
+	PlayersMax    *int
+	Err           error
+}
+
+type Status struct {
+	PlayersOnline *int
+	PlayersMax    *int
+}
+
+func StatusRequest(host string, port int, timeout time.Duration, protocolVersion int) Result {
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return Result{OK: false, Err: err}
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(timeout))
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
+	r := bufio.NewReader(conn)
+	if err := writeHandshakeAndStatusRequest(conn, host, port, protocolVersion); err != nil {
+		return Result{OK: false, Err: err}
+	}
+	status, err := readStatus(r)
+	if err != nil {
+		return Result{OK: false, Err: err}
+	}
+	return Result{OK: true, PlayersOnline: status.PlayersOnline, PlayersMax: status.PlayersMax}
 }
 
 func Ping(host string, port int, timeout time.Duration, protocolVersion int) Result {
@@ -31,38 +60,12 @@ func Ping(host string, port int, timeout time.Duration, protocolVersion int) Res
 
 	r := bufio.NewReader(conn)
 
-	handshake := new(bytes.Buffer)
-	writeVarInt(handshake, protocolVersion)
-	writeString(handshake, host)
-	binary.Write(handshake, binary.BigEndian, uint16(port))
-	writeVarInt(handshake, 1)
-	if err := writePacket(conn, 0x00, handshake.Bytes()); err != nil {
+	if err := writeHandshakeAndStatusRequest(conn, host, port, protocolVersion); err != nil {
 		return Result{OK: false, Err: err}
 	}
-
-	if err := writePacket(conn, 0x00, nil); err != nil {
-		return Result{OK: false, Err: err}
-	}
-
-	pid, payload, err := readPacket(r)
+	status, err := readStatus(r)
 	if err != nil {
 		return Result{OK: false, Err: err}
-	}
-	if pid != 0x00 {
-		return Result{OK: false, Err: fmt.Errorf("unexpected status packet id %d", pid)}
-	}
-	br := bytes.NewReader(payload)
-	jsonLen, err := readVarInt(br)
-	if err != nil {
-		return Result{OK: false, Err: err}
-	}
-	jsonBytes := make([]byte, jsonLen)
-	if _, err := readFull(br, jsonBytes); err != nil {
-		return Result{OK: false, Err: err}
-	}
-	var status map[string]any
-	if err := json.Unmarshal(jsonBytes, &status); err != nil {
-		return Result{OK: false, Err: fmt.Errorf("invalid status json: %w", err)}
 	}
 
 	nowMs := time.Now().UnixMilli()
@@ -82,7 +85,57 @@ func Ping(host string, port int, timeout time.Duration, protocolVersion int) Res
 	}
 	latency := time.Since(t0)
 
-	return Result{OK: true, LatencyMs: float64(latency.Microseconds()) / 1000.0}
+	return Result{OK: true, LatencyMs: float64(latency.Microseconds()) / 1000.0, PlayersOnline: status.PlayersOnline, PlayersMax: status.PlayersMax}
+}
+
+func writeHandshakeAndStatusRequest(conn net.Conn, host string, port int, protocolVersion int) error {
+	handshake := new(bytes.Buffer)
+	writeVarInt(handshake, protocolVersion)
+	writeString(handshake, host)
+	binary.Write(handshake, binary.BigEndian, uint16(port))
+	writeVarInt(handshake, 1)
+	if err := writePacket(conn, 0x00, handshake.Bytes()); err != nil {
+		return err
+	}
+	return writePacket(conn, 0x00, nil)
+}
+
+func readStatus(r *bufio.Reader) (Status, error) {
+	pid, payload, err := readPacket(r)
+	if err != nil {
+		return Status{}, err
+	}
+	if pid != 0x00 {
+		return Status{}, fmt.Errorf("unexpected status packet id %d", pid)
+	}
+	br := bytes.NewReader(payload)
+	jsonLen, err := readVarInt(br)
+	if err != nil {
+		return Status{}, err
+	}
+	jsonBytes := make([]byte, jsonLen)
+	if _, err := readFull(br, jsonBytes); err != nil {
+		return Status{}, err
+	}
+	return parseStatusJSON(jsonBytes)
+}
+
+func parseStatusJSON(jsonBytes []byte) (Status, error) {
+	var raw struct {
+		Players *struct {
+			Online *int `json:"online"`
+			Max    *int `json:"max"`
+		} `json:"players"`
+	}
+	if err := json.Unmarshal(jsonBytes, &raw); err != nil {
+		return Status{}, fmt.Errorf("invalid status json: %w", err)
+	}
+	var status Status
+	if raw.Players != nil {
+		status.PlayersOnline = raw.Players.Online
+		status.PlayersMax = raw.Players.Max
+	}
+	return status, nil
 }
 
 func readFull(r *bytes.Reader, buf []byte) (int, error) {

@@ -35,6 +35,14 @@ type PingResult struct {
 	LossPct  float64  `json:"loss_pct"`
 }
 
+type MetricResult struct {
+	TargetID string   `json:"target_id"`
+	Metric   string   `json:"metric"`
+	Ts       int64    `json:"ts"`
+	Value    *float64 `json:"value"`
+	Extra    string   `json:"extra,omitempty"`
+}
+
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      any    `json:"id,omitempty"`
@@ -118,6 +126,28 @@ func (r *Reporter) SendPingResult(pr PingResult) {
 		log.Printf("send pingResult: %v", err)
 		if err := r.postRPC("post", "agent.pingResult", pr); err != nil {
 			log.Printf("post pingResult: %v", err)
+		}
+	}
+}
+
+func (r *Reporter) SendMetricResult(mr MetricResult) {
+	r.mu.Lock()
+	c := r.conn
+	r.mu.Unlock()
+
+	if c == nil {
+		if err := r.postRPC("post", "agent.metricResult", mr); err != nil {
+			log.Printf("post metricResult: %v", err)
+		}
+		return
+	}
+
+	msg := rpcRequest{JSONRPC: "2.0", Method: "agent.metricResult", Params: mr}
+	data, _ := json.Marshal(msg)
+	if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
+		log.Printf("send metricResult: %v", err)
+		if err := r.postRPC("post", "agent.metricResult", mr); err != nil {
+			log.Printf("post metricResult: %v", err)
 		}
 	}
 }

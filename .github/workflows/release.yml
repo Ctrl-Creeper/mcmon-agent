@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build agent release assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          build() {
+            local goos="$1"
+            local goarch="$2"
+            local output="dist/mcmon-agent-${goos}-${goarch}"
+            if [ "$goos" = "windows" ]; then
+              output="${output}.exe"
+            fi
+            echo "Building ${output}"
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "$output" \
+              ./cmd/mcmon-agent
+          }
+
+          build linux amd64
+          build linux arm64
+          build darwin amd64
+          build darwin arm64
+          build windows amd64
+          build windows arm64
+
+          (cd dist && sha256sum * > checksums.txt)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -23,6 +24,7 @@ import (
 
 type Config struct {
 	HostURL      string   `json:"host_url"`
+	AgentID      string   `json:"agent_id"`
 	DiscoveryKey string   `json:"discovery_key"`
 	AgentName    string   `json:"agent_name"`
 	Token        string   `json:"token"`
@@ -30,19 +32,44 @@ type Config struct {
 }
 
 type Target struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	IntervalSec     int    `json:"interval_sec"`
-	TimeoutMs       int    `json:"timeout_ms"`
-	ProbesPerBurst  int    `json:"probes_per_burst"`
-	ProbeGapMs      int    `json:"probe_gap_ms"`
-	ProtocolVersion int    `json:"protocol_version"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Host            string   `json:"host"`
+	Port            int      `json:"port"`
+	TimeoutMs       int      `json:"timeout_ms"`
+	Monitors        Monitors `json:"monitors"`
+	IntervalSec     int      `json:"interval_sec"`
+	ProbesPerBurst  int      `json:"probes_per_burst"`
+	ProbeGapMs      int      `json:"probe_gap_ms"`
+	ProtocolVersion int      `json:"protocol_version"`
+}
+
+type Monitors struct {
+	Online  SimpleMonitor `json:"online"`
+	Players SimpleMonitor `json:"players"`
+	Latency ProbeMonitor  `json:"latency"`
+	Loss    ProbeMonitor  `json:"loss"`
+}
+
+type SimpleMonitor struct {
+	Enabled     bool `json:"enabled"`
+	IntervalSec int  `json:"interval_sec"`
+}
+
+type ProbeMonitor struct {
+	Enabled         bool `json:"enabled"`
+	IntervalSec     int  `json:"interval_sec"`
+	ProbesPerBurst  int  `json:"probes_per_burst"`
+	ProbeGapMs      int  `json:"probe_gap_ms"`
+	ProtocolVersion int  `json:"protocol_version,omitempty"`
 }
 
 func main() {
 	cfgPath := flag.String("config", "agent-config.json", "path to config file")
+	configB64 := flag.String("config-base64", "", "base64 encoded immutable config")
+	hostURLFlag := flag.String("host-url", "", "host URL override")
+	tokenFlag := flag.String("token", "", "agent token override")
+	agentIDFlag := flag.String("agent-id", "", "agent id override")
 	flag.Parse()
 
 	cfg := Config{
@@ -50,35 +77,29 @@ func main() {
 		AgentName: "agent-" + randHex(3),
 	}
 
-	if data, err := os.ReadFile(*cfgPath); err == nil {
+	if *configB64 != "" {
+		decoded, err := configFromBase64(*configB64)
+		if err != nil {
+			log.Fatalf("decode config-base64: %v", err)
+		}
+		cfg = decoded
+	} else if data, err := os.ReadFile(*cfgPath); err == nil {
 		json.Unmarshal(data, &cfg)
 	} else {
 		log.Printf("no config file found at %s, using defaults", *cfgPath)
 	}
+	if *hostURLFlag != "" {
+		cfg.HostURL = *hostURLFlag
+	}
+	if *tokenFlag != "" {
+		cfg.Token = *tokenFlag
+	}
+	if *agentIDFlag != "" {
+		cfg.AgentID = *agentIDFlag
+	}
 
 	for i := range cfg.Targets {
-		t := &cfg.Targets[i]
-		if t.ID == "" {
-			t.ID = randHex(8)
-		}
-		if t.Port == 0 {
-			t.Port = 25565
-		}
-		if t.IntervalSec == 0 {
-			t.IntervalSec = 60
-		}
-		if t.TimeoutMs == 0 {
-			t.TimeoutMs = 5000
-		}
-		if t.ProbesPerBurst == 0 {
-			t.ProbesPerBurst = 3
-		}
-		if t.ProbeGapMs == 0 {
-			t.ProbeGapMs = 200
-		}
-		if t.ProtocolVersion == 0 {
-			t.ProtocolVersion = 767
-		}
+		cfg.Targets[i] = normalizeTarget(cfg.Targets[i])
 	}
 
 	if cfg.Token == "" && cfg.DiscoveryKey != "" {
@@ -110,7 +131,7 @@ func main() {
 	go rep.Run()
 
 	for _, t := range cfg.Targets {
-		go probeLoop(t, rep)
+		startMonitorLoops(t, rep)
 	}
 
 	fmt.Printf("mcmon-agent running (%d targets)\n", len(cfg.Targets))
@@ -123,20 +144,176 @@ func main() {
 	rep.Stop()
 }
 
-func probeLoop(t Target, rep *reporter.Reporter) {
-	ticker := time.NewTicker(time.Duration(t.IntervalSec) * time.Second)
-	defer ticker.Stop()
+func configFromBase64(raw string) (Config, error) {
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return Config{}, err
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, err
+	}
+	for i := range cfg.Targets {
+		cfg.Targets[i] = normalizeTarget(cfg.Targets[i])
+	}
+	return cfg, nil
+}
 
-	runProbe(t, rep)
-	for range ticker.C {
-		runProbe(t, rep)
+func normalizeTarget(t Target) Target {
+	if t.ID == "" {
+		t.ID = randHex(8)
+	}
+	if t.Port == 0 {
+		t.Port = 25565
+	}
+	if t.IntervalSec == 0 {
+		t.IntervalSec = 60
+	}
+	if t.TimeoutMs == 0 {
+		t.TimeoutMs = 5000
+	}
+	if t.ProbesPerBurst == 0 {
+		t.ProbesPerBurst = 3
+	}
+	if t.ProbeGapMs == 0 {
+		t.ProbeGapMs = 200
+	}
+	if t.ProtocolVersion == 0 {
+		t.ProtocolVersion = 760
+	}
+	t.Monitors = normalizeMonitors(t)
+	return t
+}
+
+func normalizeMonitors(t Target) Monitors {
+	m := t.Monitors
+	if !hasExplicitMonitors(m) {
+		m.Online.Enabled = true
+		m.Players.Enabled = true
+		m.Latency.Enabled = true
+		m.Loss.Enabled = true
+	}
+	if m.Online.IntervalSec <= 0 {
+		m.Online.IntervalSec = t.IntervalSec
+	}
+	if m.Players.IntervalSec <= 0 {
+		m.Players.IntervalSec = t.IntervalSec
+	}
+	if m.Latency.IntervalSec <= 0 {
+		m.Latency.IntervalSec = t.IntervalSec
+	}
+	if m.Latency.ProbesPerBurst <= 0 {
+		m.Latency.ProbesPerBurst = t.ProbesPerBurst
+	}
+	if m.Latency.ProbeGapMs <= 0 {
+		m.Latency.ProbeGapMs = t.ProbeGapMs
+	}
+	if m.Latency.ProtocolVersion <= 0 {
+		m.Latency.ProtocolVersion = t.ProtocolVersion
+	}
+	if m.Loss.IntervalSec <= 0 {
+		m.Loss.IntervalSec = t.IntervalSec
+	}
+	if m.Loss.ProbesPerBurst <= 0 {
+		m.Loss.ProbesPerBurst = t.ProbesPerBurst
+	}
+	if m.Loss.ProbeGapMs <= 0 {
+		m.Loss.ProbeGapMs = t.ProbeGapMs
+	}
+	return m
+}
+
+func hasExplicitMonitors(m Monitors) bool {
+	return m.Online.Enabled || m.Players.Enabled || m.Latency.Enabled || m.Loss.Enabled ||
+		m.Online.IntervalSec > 0 || m.Players.IntervalSec > 0 || m.Latency.IntervalSec > 0 || m.Loss.IntervalSec > 0
+}
+
+func startMonitorLoops(t Target, rep *reporter.Reporter) {
+	if t.Monitors.Online.Enabled {
+		go monitorLoop(t, "online", t.Monitors.Online.IntervalSec, rep, func() { runOnline(t, rep) })
+	}
+	if t.Monitors.Players.Enabled {
+		go monitorLoop(t, "players", t.Monitors.Players.IntervalSec, rep, func() { runPlayers(t, rep) })
+	}
+	if t.Monitors.Latency.Enabled {
+		go monitorLoop(t, "latency", t.Monitors.Latency.IntervalSec, rep, func() { runLatency(t, rep) })
+	}
+	if t.Monitors.Loss.Enabled {
+		go monitorLoop(t, "loss", t.Monitors.Loss.IntervalSec, rep, func() { runLoss(t, rep) })
 	}
 }
 
-func runProbe(t Target, rep *reporter.Reporter) {
+func monitorLoop(t Target, metric string, intervalSec int, rep *reporter.Reporter, fn func()) {
+	interval := time.Duration(intervalSec) * time.Second
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	fn()
+	for range ticker.C {
+		fn()
+	}
+}
+
+func runOnline(t Target, rep *reporter.Reporter) {
+	res := mcping.StatusRequest(t.Host, t.Port, time.Duration(t.TimeoutMs)*time.Millisecond, 760)
+	value := 0.0
+	if res.OK {
+		value = 1
+	}
+	rep.SendMetricResult(reporter.MetricResult{TargetID: t.ID, Metric: "online", Ts: time.Now().Unix(), Value: &value})
+}
+
+func runPlayers(t Target, rep *reporter.Reporter) {
+	res := mcping.StatusRequest(t.Host, t.Port, time.Duration(t.TimeoutMs)*time.Millisecond, 760)
+	mr := reporter.MetricResult{TargetID: t.ID, Metric: "players", Ts: time.Now().Unix()}
+	if res.OK && res.PlayersOnline != nil {
+		value := float64(*res.PlayersOnline)
+		mr.Value = &value
+		if res.PlayersMax != nil {
+			b, _ := json.Marshal(map[string]int{"max": *res.PlayersMax})
+			mr.Extra = string(b)
+		}
+	}
+	rep.SendMetricResult(mr)
+}
+
+func runLatency(t Target, rep *reporter.Reporter) {
+	result := runProbeBurst(t, t.Monitors.Latency)
+	ts := time.Now().Unix()
+	mr := reporter.MetricResult{TargetID: t.ID, Metric: "latency", Ts: ts, Value: result.P50Ms}
+	b, _ := json.Marshal(map[string]any{"min": result.MinMs, "p50": result.P50Ms, "max": result.MaxMs, "loss_pct": result.LossPct})
+	mr.Extra = string(b)
+	rep.SendMetricResult(mr)
+	rep.SendPingResult(reporter.PingResult{TargetID: t.ID, Ts: ts, MinMs: result.MinMs, P50Ms: result.P50Ms, MaxMs: result.MaxMs, LossPct: result.LossPct})
+}
+
+func runLoss(t Target, rep *reporter.Reporter) {
+	result := runProbeBurst(t, t.Monitors.Loss)
+	value := result.LossPct
+	rep.SendMetricResult(reporter.MetricResult{TargetID: t.ID, Metric: "loss", Ts: time.Now().Unix(), Value: &value})
+}
+
+type probeBurstResult struct {
+	MinMs   *float64
+	P50Ms   *float64
+	MaxMs   *float64
+	LossPct float64
+}
+
+func runProbeBurst(t Target, mon ProbeMonitor) probeBurstResult {
 	timeout := time.Duration(t.TimeoutMs) * time.Millisecond
-	gap := time.Duration(t.ProbeGapMs) * time.Millisecond
-	n := t.ProbesPerBurst
+	gap := time.Duration(mon.ProbeGapMs) * time.Millisecond
+	n := mon.ProbesPerBurst
+	if n <= 0 {
+		n = 3
+	}
+	proto := mon.ProtocolVersion
+	if proto <= 0 {
+		proto = 760
+	}
 
 	var latencies []float64
 	var failures int
@@ -145,7 +322,7 @@ func runProbe(t Target, rep *reporter.Reporter) {
 		if i > 0 {
 			time.Sleep(gap)
 		}
-		res := mcping.Ping(t.Host, t.Port, timeout, t.ProtocolVersion)
+		res := mcping.Ping(t.Host, t.Port, timeout, proto)
 		if res.OK {
 			latencies = append(latencies, res.LatencyMs)
 		} else {
@@ -154,27 +331,21 @@ func runProbe(t Target, rep *reporter.Reporter) {
 		}
 	}
 
-	lossPct := float64(failures) / float64(n)
-	pr := reporter.PingResult{
-		TargetID: t.ID,
-		Ts:       time.Now().Unix(),
-		LossPct:  lossPct,
-	}
+	out := probeBurstResult{LossPct: float64(failures) / float64(n)}
 
 	if len(latencies) > 0 {
 		sort.Float64s(latencies)
 		minV := latencies[0]
 		maxV := latencies[len(latencies)-1]
 		p50 := percentile(latencies, 0.5)
-		pr.MinMs = &minV
-		pr.MaxMs = &maxV
-		pr.P50Ms = &p50
-		log.Printf("[%s] min=%.1f p50=%.1f max=%.1f loss=%.0f%%", t.Name, minV, p50, maxV, lossPct*100)
+		out.MinMs = &minV
+		out.MaxMs = &maxV
+		out.P50Ms = &p50
+		log.Printf("[%s] min=%.1f p50=%.1f max=%.1f loss=%.0f%%", t.Name, minV, p50, maxV, out.LossPct*100)
 	} else {
 		log.Printf("[%s] all %d probes failed", t.Name, n)
 	}
-
-	rep.SendPingResult(pr)
+	return out
 }
 
 func percentile(sorted []float64, p float64) float64 {
