@@ -4,7 +4,7 @@ set -eu
 SERVICE_NAME="mcmon-agent"
 INSTALL_DIR=""
 CONFIG_PATH=""
-REPO="Ctrl-Creeper/mcmon-agent"
+REPO="YOUR_PATH/mcmon-agent"
 VERSION="latest"
 HOST_URL=""
 AGENT_ID=""
@@ -110,7 +110,7 @@ elif [ "$OS" = "darwin" ]; then
   INSTALL_DIR="${INSTALL_DIR:-/usr/local/mcmon-agent}"
   CONFIG_PATH="${CONFIG_PATH:-/usr/local/etc/mcmon-agent/config.json}"
   BIN_PATH="${INSTALL_DIR}/mcmon-agent"
-  PLIST="/Library/LaunchDaemons/com.ctrl-creeper.${SERVICE_NAME}.plist"
+  PLIST="/Library/LaunchDaemons/com.YOUR_PATH.${SERVICE_NAME}.plist"
 
   echo "Install dir: ${INSTALL_DIR}"
   launchctl bootout system "$PLIST" >/dev/null 2>&1 || true
@@ -128,7 +128,7 @@ elif [ "$OS" = "darwin" ]; then
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.ctrl-creeper.${SERVICE_NAME}</string>
+  <string>com.YOUR_PATH.${SERVICE_NAME}</string>
   <key>ProgramArguments</key>
   <array>
     <string>${BIN_PATH}</string>

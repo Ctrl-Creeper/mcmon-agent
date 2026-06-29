@@ -16,7 +16,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   throw "Please run this installer from an elevated PowerShell session."
 }
 
-$repo = "Ctrl-Creeper/mcmon-agent"
+$repo = "YOUR_PATH/mcmon-agent"
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   "AMD64" { "amd64" }
   "ARM64" { "arm64" }

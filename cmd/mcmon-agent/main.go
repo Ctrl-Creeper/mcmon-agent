@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lewiswu/mcmon-agent/internal/mcping"
-	"github.com/lewiswu/mcmon-agent/internal/reporter"
+	"github.com/YOUR_PATH/mcmon-agent/internal/mcping"
+	"github.com/YOUR_PATH/mcmon-agent/internal/reporter"
 )
 
 type Config struct {
