@@ -62,8 +62,21 @@ type Reporter struct {
 
 	mu         sync.Mutex
 	conn       *websocket.Conn
+	writeMu    sync.Mutex // serializes WriteMessage on conn; gorilla forbids concurrent writers
 	done       chan struct{}
 	httpClient *http.Client
+}
+
+// writeWS serializes writes to the active conn. Callers must NOT hold r.mu.
+// Returns an error if the conn is nil or the write fails — the caller
+// decides whether to fall back to HTTP.
+func (r *Reporter) writeWS(c *websocket.Conn, data []byte) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	if c == nil {
+		return fmt.Errorf("ws not connected")
+	}
+	return c.WriteMessage(websocket.TextMessage, data)
 }
 
 func New(hostURL, token string, targets []Target) *Reporter {
@@ -122,7 +135,7 @@ func (r *Reporter) SendPingResult(pr PingResult) {
 
 	msg := rpcRequest{JSONRPC: "2.0", Method: "agent.pingResult", Params: pr}
 	data, _ := json.Marshal(msg)
-	if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := r.writeWS(c, data); err != nil {
 		log.Printf("send pingResult: %v", err)
 		if err := r.postRPC("post", "agent.pingResult", pr); err != nil {
 			log.Printf("post pingResult: %v", err)
@@ -144,7 +157,7 @@ func (r *Reporter) SendMetricResult(mr MetricResult) {
 
 	msg := rpcRequest{JSONRPC: "2.0", Method: "agent.metricResult", Params: mr}
 	data, _ := json.Marshal(msg)
-	if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
+	if err := r.writeWS(c, data); err != nil {
 		log.Printf("send metricResult: %v", err)
 		if err := r.postRPC("post", "agent.metricResult", mr); err != nil {
 			log.Printf("post metricResult: %v", err)
@@ -161,10 +174,10 @@ func (r *Reporter) connect() error {
 		return err
 	}
 
-	r.mu.Lock()
-	r.conn = ws
-	r.mu.Unlock()
-
+	// Send agent.hello BEFORE publishing the conn to other goroutines.
+	// Otherwise a concurrent SendPingResult could grab writeMu first and
+	// arrive at the host before hello — leaving orphan samples on the
+	// very first connect (before targets are registered).
 	hello := rpcRequest{
 		JSONRPC: "2.0",
 		ID:      1,
@@ -172,10 +185,17 @@ func (r *Reporter) connect() error {
 		Params:  agentHello{Version: "1.0", Targets: r.targets},
 	}
 	data, _ := json.Marshal(hello)
-	if err := ws.WriteMessage(websocket.TextMessage, data); err != nil {
+	r.writeMu.Lock()
+	err = ws.WriteMessage(websocket.TextMessage, data)
+	r.writeMu.Unlock()
+	if err != nil {
 		ws.Close()
 		return err
 	}
+
+	r.mu.Lock()
+	r.conn = ws
+	r.mu.Unlock()
 
 	log.Printf("connected to host, sent hello with %d targets", len(r.targets))
 	return nil
