@@ -1,4 +1,4 @@
-module github.com/YOUR_PATH/mcmon-agent
+module github.com/Ctrl-Creeper/mcmon-agent
 
 go 1.25.4
 

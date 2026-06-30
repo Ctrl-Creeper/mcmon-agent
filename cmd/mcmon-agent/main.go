@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/YOUR_PATH/mcmon-agent/internal/mcping"
-	"github.com/YOUR_PATH/mcmon-agent/internal/reporter"
+	"github.com/Ctrl-Creeper/mcmon-agent/internal/mcping"
+	"github.com/Ctrl-Creeper/mcmon-agent/internal/reporter"
 )
 
 type Config struct {
@@ -84,7 +84,9 @@ func main() {
 		}
 		cfg = decoded
 	} else if data, err := os.ReadFile(*cfgPath); err == nil {
-		json.Unmarshal(data, &cfg)
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			log.Fatalf("parse config %s: %v", *cfgPath, err)
+		}
 	} else {
 		log.Printf("no config file found at %s, using defaults", *cfgPath)
 	}
@@ -121,6 +123,7 @@ func main() {
 
 	wsURL := strings.Replace(cfg.HostURL, "http://", "ws://", 1)
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+	warnIfInsecureRemote(wsURL)
 
 	targets := make([]reporter.Target, len(cfg.Targets))
 	for i, t := range cfg.Targets {
@@ -401,6 +404,24 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// warnIfInsecureRemote logs a warning when the host URL uses an unencrypted
+// scheme against a non-loopback host — the agent token would otherwise be
+// sent over the network in cleartext.
+func warnIfInsecureRemote(wsURL string) {
+	u, err := url.Parse(wsURL)
+	if err != nil || u.Host == "" {
+		return
+	}
+	if u.Scheme == "wss" || u.Scheme == "https" {
+		return
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return
+	}
+	log.Printf("WARNING: connecting to %s over unencrypted %s — agent token will be sent in cleartext. Use wss:// or a TLS-terminating proxy.", u.Host, u.Scheme)
 }
 
 func httpURL(raw string) string {
