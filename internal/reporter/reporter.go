@@ -59,12 +59,28 @@ type Reporter struct {
 	hostURL string
 	token   string
 	targets []Target
+	verbose bool
 
 	mu         sync.Mutex
 	conn       *websocket.Conn
 	writeMu    sync.Mutex // serializes WriteMessage on conn; gorilla forbids concurrent writers
 	done       chan struct{}
 	httpClient *http.Client
+}
+
+func (r *Reporter) SetVerbose(verbose bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.verbose = verbose
+}
+
+func (r *Reporter) infof(format string, args ...any) {
+	r.mu.Lock()
+	verbose := r.verbose
+	r.mu.Unlock()
+	if verbose {
+		log.Printf(format, args...)
+	}
 }
 
 // writeWS serializes writes to the active conn. Callers must NOT hold r.mu.
@@ -107,7 +123,7 @@ func (r *Reporter) Run() {
 		}
 
 		r.readLoop()
-		log.Printf("ws disconnected — reconnecting in %v", reconnectDelay)
+		r.infof("ws disconnected — reconnecting in %v", reconnectDelay)
 		time.Sleep(reconnectDelay)
 	}
 }
@@ -197,7 +213,7 @@ func (r *Reporter) connect() error {
 	r.conn = ws
 	r.mu.Unlock()
 
-	log.Printf("connected to host, sent hello with %d targets", len(r.targets))
+	r.infof("connected to host, sent hello with %d targets", len(r.targets))
 	return nil
 }
 

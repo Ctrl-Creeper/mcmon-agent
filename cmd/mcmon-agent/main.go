@@ -70,6 +70,7 @@ func main() {
 	hostURLFlag := flag.String("host-url", "", "host URL override")
 	tokenFlag := flag.String("token", "", "agent token override")
 	agentIDFlag := flag.String("agent-id", "", "agent id override")
+	verbose := flag.Bool("verbose", false, "enable informational logs")
 	flag.Parse()
 
 	cfg := Config{
@@ -87,7 +88,7 @@ func main() {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			log.Fatalf("parse config %s: %v", *cfgPath, err)
 		}
-	} else {
+	} else if *verbose {
 		log.Printf("no config file found at %s, using defaults", *cfgPath)
 	}
 	if *hostURLFlag != "" {
@@ -105,14 +106,18 @@ func main() {
 	}
 
 	if cfg.Token == "" && cfg.DiscoveryKey != "" {
-		log.Printf("no token — running auto-discovery against %s", cfg.HostURL)
+		if *verbose {
+			log.Printf("no token; running auto-discovery against %s", cfg.HostURL)
+		}
 		token, err := discover(cfg.HostURL, cfg.DiscoveryKey, cfg.AgentName)
 		if err != nil {
 			log.Fatalf("auto-discovery failed: %v", err)
 		}
 		cfg.Token = token
 		saveConfig(*cfgPath, cfg)
-		log.Printf("registered with host, token saved to %s", *cfgPath)
+		if *verbose {
+			log.Printf("registered with host, token saved to %s", *cfgPath)
+		}
 	}
 
 	if cfg.Token == "" {
@@ -131,19 +136,24 @@ func main() {
 	}
 
 	rep := reporter.New(wsURL, cfg.Token, targets)
+	rep.SetVerbose(*verbose)
 	go rep.Run()
 
 	for _, t := range cfg.Targets {
-		startMonitorLoops(t, rep)
+		startMonitorLoops(t, rep, *verbose)
 	}
 
-	fmt.Printf("mcmon-agent running (%d targets)\n", len(cfg.Targets))
-	fmt.Printf("host: %s\n", cfg.HostURL)
+	if *verbose {
+		fmt.Printf("mcmon-agent running (%d targets)\n", len(cfg.Targets))
+		fmt.Printf("host: %s\n", cfg.HostURL)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
 	<-sig
-	log.Println("shutting down")
+	if *verbose {
+		log.Println("shutting down")
+	}
 	rep.Stop()
 }
 
@@ -231,7 +241,7 @@ func hasExplicitMonitors(m Monitors) bool {
 		m.Online.IntervalSec > 0 || m.Players.IntervalSec > 0 || m.Latency.IntervalSec > 0 || m.Loss.IntervalSec > 0
 }
 
-func startMonitorLoops(t Target, rep *reporter.Reporter) {
+func startMonitorLoops(t Target, rep *reporter.Reporter, verbose bool) {
 	if t.Monitors.Online.Enabled {
 		go monitorLoop(t, "online", t.Monitors.Online.IntervalSec, rep, func() { runOnline(t, rep) })
 	}
@@ -239,10 +249,10 @@ func startMonitorLoops(t Target, rep *reporter.Reporter) {
 		go monitorLoop(t, "players", t.Monitors.Players.IntervalSec, rep, func() { runPlayers(t, rep) })
 	}
 	if t.Monitors.Latency.Enabled {
-		go monitorLoop(t, "latency", t.Monitors.Latency.IntervalSec, rep, func() { runLatency(t, rep) })
+		go monitorLoop(t, "latency", t.Monitors.Latency.IntervalSec, rep, func() { runLatency(t, rep, verbose) })
 	}
 	if t.Monitors.Loss.Enabled {
-		go monitorLoop(t, "loss", t.Monitors.Loss.IntervalSec, rep, func() { runLoss(t, rep) })
+		go monitorLoop(t, "loss", t.Monitors.Loss.IntervalSec, rep, func() { runLoss(t, rep, verbose) })
 	}
 }
 
@@ -283,8 +293,8 @@ func runPlayers(t Target, rep *reporter.Reporter) {
 	rep.SendMetricResult(mr)
 }
 
-func runLatency(t Target, rep *reporter.Reporter) {
-	result := runProbeBurst(t, t.Monitors.Latency)
+func runLatency(t Target, rep *reporter.Reporter, verbose bool) {
+	result := runProbeBurst(t, t.Monitors.Latency, verbose)
 	ts := time.Now().Unix()
 	mr := reporter.MetricResult{TargetID: t.ID, Metric: "latency", Ts: ts, Value: result.P50Ms}
 	b, _ := json.Marshal(map[string]any{"min": result.MinMs, "p50": result.P50Ms, "max": result.MaxMs, "loss_pct": result.LossPct})
@@ -293,8 +303,8 @@ func runLatency(t Target, rep *reporter.Reporter) {
 	rep.SendPingResult(reporter.PingResult{TargetID: t.ID, Ts: ts, MinMs: result.MinMs, P50Ms: result.P50Ms, MaxMs: result.MaxMs, LossPct: result.LossPct})
 }
 
-func runLoss(t Target, rep *reporter.Reporter) {
-	result := runProbeBurst(t, t.Monitors.Loss)
+func runLoss(t Target, rep *reporter.Reporter, verbose bool) {
+	result := runProbeBurst(t, t.Monitors.Loss, verbose)
 	value := result.LossPct
 	rep.SendMetricResult(reporter.MetricResult{TargetID: t.ID, Metric: "loss", Ts: time.Now().Unix(), Value: &value})
 }
@@ -306,7 +316,7 @@ type probeBurstResult struct {
 	LossPct float64
 }
 
-func runProbeBurst(t Target, mon ProbeMonitor) probeBurstResult {
+func runProbeBurst(t Target, mon ProbeMonitor, verbose bool) probeBurstResult {
 	timeout := time.Duration(t.TimeoutMs) * time.Millisecond
 	gap := time.Duration(mon.ProbeGapMs) * time.Millisecond
 	n := mon.ProbesPerBurst
@@ -330,7 +340,9 @@ func runProbeBurst(t Target, mon ProbeMonitor) probeBurstResult {
 			latencies = append(latencies, res.LatencyMs)
 		} else {
 			failures++
-			log.Printf("[%s] probe %d/%d failed: %v", t.Name, i+1, n, res.Err)
+			if verbose {
+				log.Printf("[%s] probe %d/%d failed: %v", t.Name, i+1, n, res.Err)
+			}
 		}
 	}
 
@@ -344,8 +356,10 @@ func runProbeBurst(t Target, mon ProbeMonitor) probeBurstResult {
 		out.MinMs = &minV
 		out.MaxMs = &maxV
 		out.P50Ms = &p50
-		log.Printf("[%s] min=%.1f p50=%.1f max=%.1f loss=%.0f%%", t.Name, minV, p50, maxV, out.LossPct*100)
-	} else {
+		if verbose {
+			log.Printf("[%s] min=%.1f p50=%.1f max=%.1f loss=%.0f%%", t.Name, minV, p50, maxV, out.LossPct*100)
+		}
+	} else if verbose {
 		log.Printf("[%s] all %d probes failed", t.Name, n)
 	}
 	return out
@@ -416,7 +430,8 @@ func randHex(n int) string {
 
 // warnIfInsecureRemote logs a warning when the host URL uses an unencrypted
 // scheme against a non-loopback host — the agent token would otherwise be
-// sent over the network in cleartext.
+// sent over the network in cleartext. Always prints regardless of --verbose:
+// credential-leak warnings must not be silenceable by the default log level.
 func warnIfInsecureRemote(wsURL string) {
 	u, err := url.Parse(wsURL)
 	if err != nil || u.Host == "" {
