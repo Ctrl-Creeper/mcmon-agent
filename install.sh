@@ -11,6 +11,56 @@ AGENT_ID=""
 TOKEN=""
 CONFIG_BASE64=""
 
+print_linux_summary() {
+  cat <<EOF
+
+mcmon-agent is installed and running.
+
+Connection:
+  Host:     ${HOST_URL}
+  Agent ID: ${AGENT_ID}
+
+Important files:
+  Binary:  ${BIN_PATH}
+  Config:  ${CONFIG_PATH}
+  Service: /etc/systemd/system/${SERVICE_NAME}.service
+
+Service commands:
+  Status:  systemctl status ${SERVICE_NAME} --no-pager -l
+  Logs:    journalctl -u ${SERVICE_NAME} -f
+  Restart: sudo systemctl restart ${SERVICE_NAME}
+  Stop:    sudo systemctl stop ${SERVICE_NAME}
+
+To change this agent, update the node config in mcmon-host and run the newly generated install command again.
+
+EOF
+}
+
+print_macos_summary() {
+  cat <<EOF
+
+mcmon-agent is installed and running.
+
+Connection:
+  Host:     ${HOST_URL}
+  Agent ID: ${AGENT_ID}
+
+Important files:
+  Binary: ${BIN_PATH}
+  Config: ${CONFIG_PATH}
+  Plist:  ${PLIST}
+  Logs:   /var/log/${SERVICE_NAME}.log
+          /var/log/${SERVICE_NAME}.err.log
+
+Service commands:
+  Stop:    sudo launchctl bootout system ${PLIST}
+  Start:   sudo launchctl bootstrap system ${PLIST}
+
+To change this agent, update the node config in mcmon-host and run the newly generated install command again.
+
+EOF
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --service-name) SERVICE_NAME="$2"; shift 2 ;;
@@ -106,7 +156,7 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}.service"
-  echo "mcmon-agent installed and started."
+  print_linux_summary
 elif [ "$OS" = "darwin" ]; then
   INSTALL_DIR="${INSTALL_DIR:-/usr/local/mcmon-agent}"
   CONFIG_PATH="${CONFIG_PATH:-/usr/local/etc/mcmon-agent/config.json}"
@@ -155,7 +205,7 @@ elif [ "$OS" = "darwin" ]; then
 EOF
   chmod 0644 "$PLIST"
   launchctl bootstrap system "$PLIST"
-  echo "mcmon-agent installed and started."
+  print_macos_summary
 else
   echo "Unsupported OS: ${OS}" >&2
   exit 1
