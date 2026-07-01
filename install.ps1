@@ -16,7 +16,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   throw "Please run this installer from an elevated PowerShell session."
 }
 
-$repo = "YOUR_PATH/mcmon-agent"
+$repo = "Ctrl-Creeper/mcmon-agent"
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   "AMD64" { "amd64" }
   "ARM64" { "arm64" }
@@ -24,7 +24,11 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 }
 
 if ($Version -eq "latest") {
-  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
+  try {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
+  } catch {
+    throw "Unable to resolve latest version from https://api.github.com/repos/$repo/releases/latest. Check that the repository exists and has at least one GitHub Release."
+  }
   $Version = $release.tag_name
 }
 if (-not $Version) {

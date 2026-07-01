@@ -4,7 +4,7 @@ set -eu
 SERVICE_NAME="mcmon-agent"
 INSTALL_DIR=""
 CONFIG_PATH=""
-REPO="YOUR_PATH/mcmon-agent"
+REPO="Ctrl-Creeper/mcmon-agent"
 VERSION="latest"
 HOST_URL=""
 AGENT_ID=""
@@ -52,10 +52,11 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 if [ "$VERSION" = "latest" ]; then
-  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
 fi
 if [ -z "$VERSION" ]; then
-  echo "Unable to resolve latest version" >&2
+  echo "Unable to resolve latest version from https://api.github.com/repos/${REPO}/releases/latest" >&2
+  echo "Check that the repository exists and has at least one GitHub Release." >&2
   exit 1
 fi
 
@@ -110,7 +111,7 @@ elif [ "$OS" = "darwin" ]; then
   INSTALL_DIR="${INSTALL_DIR:-/usr/local/mcmon-agent}"
   CONFIG_PATH="${CONFIG_PATH:-/usr/local/etc/mcmon-agent/config.json}"
   BIN_PATH="${INSTALL_DIR}/mcmon-agent"
-  PLIST="/Library/LaunchDaemons/com.YOUR_PATH.${SERVICE_NAME}.plist"
+  PLIST="/Library/LaunchDaemons/com.mcmon.${SERVICE_NAME}.plist"
 
   echo "Install dir: ${INSTALL_DIR}"
   launchctl bootout system "$PLIST" >/dev/null 2>&1 || true
@@ -128,7 +129,7 @@ elif [ "$OS" = "darwin" ]; then
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.YOUR_PATH.${SERVICE_NAME}</string>
+  <string>com.mcmon.${SERVICE_NAME}</string>
   <key>ProgramArguments</key>
   <array>
     <string>${BIN_PATH}</string>
