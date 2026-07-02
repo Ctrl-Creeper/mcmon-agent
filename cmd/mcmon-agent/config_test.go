@@ -14,3 +14,41 @@ func TestDecodeBase64Config(t *testing.T) {
 		t.Fatalf("cfg targets = %#v", cfg.Targets)
 	}
 }
+
+func TestCanShareLatencyLossProbeBurst(t *testing.T) {
+	tgt := normalizeTarget(Target{
+		ID: "srv", Host: "mc.example.com",
+		Monitors: Monitors{
+			Latency: ProbeMonitor{Enabled: true},
+			Loss:    ProbeMonitor{Enabled: true},
+		},
+	})
+
+	if !canShareLatencyLoss(tgt) {
+		t.Fatalf("matching latency/loss monitors should share a probe burst: %#v", tgt.Monitors)
+	}
+
+	tgt.Monitors.Loss.IntervalSec++
+	if canShareLatencyLoss(tgt) {
+		t.Fatal("different probe intervals must not share a probe burst")
+	}
+}
+
+func TestCanShareLatencyLossUsesEffectiveProtocol(t *testing.T) {
+	tgt := normalizeTarget(Target{
+		ID: "srv", Host: "mc.example.com", ProtocolVersion: 765,
+		Monitors: Monitors{
+			Latency: ProbeMonitor{Enabled: true, ProtocolVersion: 765},
+			Loss:    ProbeMonitor{Enabled: true},
+		},
+	})
+
+	if !canShareLatencyLoss(tgt) {
+		t.Fatalf("loss monitor without explicit protocol should inherit target protocol: %#v", tgt.Monitors)
+	}
+
+	tgt.Monitors.Loss.ProtocolVersion = 760
+	if canShareLatencyLoss(tgt) {
+		t.Fatal("different effective protocol versions must not share a probe burst")
+	}
+}

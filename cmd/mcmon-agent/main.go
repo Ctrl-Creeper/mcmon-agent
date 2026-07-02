@@ -248,12 +248,36 @@ func startMonitorLoops(t Target, rep *reporter.Reporter, verbose bool) {
 	if t.Monitors.Players.Enabled {
 		go monitorLoop(t, "players", t.Monitors.Players.IntervalSec, rep, func() { runPlayers(t, rep) })
 	}
+	if canShareLatencyLoss(t) {
+		go monitorLoop(t, "latency-loss", t.Monitors.Latency.IntervalSec, rep, func() { runLatencyAndLoss(t, rep, verbose) })
+		return
+	}
 	if t.Monitors.Latency.Enabled {
 		go monitorLoop(t, "latency", t.Monitors.Latency.IntervalSec, rep, func() { runLatency(t, rep, verbose) })
 	}
 	if t.Monitors.Loss.Enabled {
 		go monitorLoop(t, "loss", t.Monitors.Loss.IntervalSec, rep, func() { runLoss(t, rep, verbose) })
 	}
+}
+
+func canShareLatencyLoss(t Target) bool {
+	latency := t.Monitors.Latency
+	loss := t.Monitors.Loss
+	return latency.Enabled && loss.Enabled &&
+		latency.IntervalSec == loss.IntervalSec &&
+		latency.ProbesPerBurst == loss.ProbesPerBurst &&
+		latency.ProbeGapMs == loss.ProbeGapMs &&
+		effectiveProbeProtocol(t, latency) == effectiveProbeProtocol(t, loss)
+}
+
+func effectiveProbeProtocol(t Target, mon ProbeMonitor) int {
+	if mon.ProtocolVersion > 0 {
+		return mon.ProtocolVersion
+	}
+	if t.ProtocolVersion > 0 {
+		return t.ProtocolVersion
+	}
+	return 760
 }
 
 func monitorLoop(t Target, metric string, intervalSec int, rep *reporter.Reporter, fn func()) {
@@ -296,6 +320,23 @@ func runPlayers(t Target, rep *reporter.Reporter) {
 func runLatency(t Target, rep *reporter.Reporter, verbose bool) {
 	result := runProbeBurst(t, t.Monitors.Latency, verbose)
 	ts := time.Now().Unix()
+	sendLatencyResult(t, rep, result, ts)
+}
+
+func runLoss(t Target, rep *reporter.Reporter, verbose bool) {
+	result := runProbeBurst(t, t.Monitors.Loss, verbose)
+	ts := time.Now().Unix()
+	sendLossResult(t, rep, result, ts)
+}
+
+func runLatencyAndLoss(t Target, rep *reporter.Reporter, verbose bool) {
+	result := runProbeBurst(t, t.Monitors.Latency, verbose)
+	ts := time.Now().Unix()
+	sendLatencyResult(t, rep, result, ts)
+	sendLossResult(t, rep, result, ts)
+}
+
+func sendLatencyResult(t Target, rep *reporter.Reporter, result probeBurstResult, ts int64) {
 	mr := reporter.MetricResult{TargetID: t.ID, Metric: "latency", Ts: ts, Value: result.P50Ms}
 	b, _ := json.Marshal(map[string]any{"min": result.MinMs, "p50": result.P50Ms, "max": result.MaxMs, "loss_pct": result.LossPct})
 	mr.Extra = string(b)
@@ -303,10 +344,9 @@ func runLatency(t Target, rep *reporter.Reporter, verbose bool) {
 	rep.SendPingResult(reporter.PingResult{TargetID: t.ID, Ts: ts, MinMs: result.MinMs, P50Ms: result.P50Ms, MaxMs: result.MaxMs, LossPct: result.LossPct})
 }
 
-func runLoss(t Target, rep *reporter.Reporter, verbose bool) {
-	result := runProbeBurst(t, t.Monitors.Loss, verbose)
+func sendLossResult(t Target, rep *reporter.Reporter, result probeBurstResult, ts int64) {
 	value := result.LossPct
-	rep.SendMetricResult(reporter.MetricResult{TargetID: t.ID, Metric: "loss", Ts: time.Now().Unix(), Value: &value})
+	rep.SendMetricResult(reporter.MetricResult{TargetID: t.ID, Metric: "loss", Ts: ts, Value: &value})
 }
 
 type probeBurstResult struct {
@@ -325,7 +365,7 @@ func runProbeBurst(t Target, mon ProbeMonitor, verbose bool) probeBurstResult {
 	}
 	proto := mon.ProtocolVersion
 	if proto <= 0 {
-		proto = 760
+		proto = effectiveProbeProtocol(t, mon)
 	}
 
 	var latencies []float64
